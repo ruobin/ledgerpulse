@@ -1,0 +1,12 @@
+# Replace {$APP_DOMAIN} with your VPS domain (e.g. ledgerpulse.yourdomain.com)
+# For local IP-only testing, use :80 instead of {$APP_DOMAIN}
+{$APP_DOMAIN:localhost} {
+    encode gzip zstd
+    reverse_proxy web:3000
+
+    header {
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}

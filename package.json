@@ -1,0 +1,44 @@
+{
+  "name": "ledgerpulse",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Automated IBKR statement ingestion, Gmail sync, and evidence-gated portfolio intelligence in TypeScript",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "eval": "tsx src/cli/index.ts --eval",
+    "metrics": "tsx src/cli/index.ts --metrics",
+    "worker": "tsx src/worker/scheduler.ts"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.42",
+    "@langchain/langgraph": "^0.2.57",
+    "@langchain/openai": "^0.4.4",
+    "better-sqlite3": "^11.9.1",
+    "googleapis": "^148.0.0",
+    "lucide-react": "^0.483.0",
+    "next": "^15.2.4",
+    "openai": "^4.91.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "unpdf": "^0.12.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.14",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "tailwindcss": "^4.0.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}
