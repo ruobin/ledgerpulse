@@ -241,13 +241,27 @@ export async function extractStatement(
   });
 }
 
-export function httpUrl(rawUrl: string): boolean {
+/**
+ * Canonical href for an http(s) URL without embedded credentials, or null. The WHATWG
+ * serialization percent-encodes whitespace and `<`/`>`, so the result is safe inside a
+ * Markdown `<...>` link destination.
+ */
+export function normalizeHttpUrl(rawUrl: string): string | null {
   try {
     const parsed = new URL(rawUrl);
-    return (parsed.protocol === "http:" || parsed.protocol === "https:") && Boolean(parsed.host) && !parsed.username;
+    const allowed =
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      Boolean(parsed.host) &&
+      !parsed.username &&
+      !parsed.password;
+    return allowed ? parsed.href : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export function httpUrl(rawUrl: string): boolean {
+  return normalizeHttpUrl(rawUrl) !== null;
 }
 
 export interface NormalizedAnnotation {
@@ -272,11 +286,12 @@ export function normalizeResearchFromResponse(
     const replacements: Array<{ start: number; end: number; link: string }> = [];
 
     for (const ann of annotations) {
-      if (!httpUrl(ann.url)) continue;
-      const title = ann.title || ann.url;
-      sourcesMap.set(ann.url, { title, url: ann.url });
+      const url = normalizeHttpUrl(ann.url);
+      if (!url) continue;
+      const title = ann.title?.trim() || url;
+      sourcesMap.set(url, { title, url });
       const label = title.replace(/[\[\]\r\n]/g, "").slice(0, 150);
-      const link = `[${label}](<${ann.url}>)`;
+      const link = `[${label}](<${url}>)`;
       if (
         typeof ann.start_index === "number" &&
         typeof ann.end_index === "number" &&
@@ -288,9 +303,15 @@ export function normalizeResearchFromResponse(
       }
     }
 
+    // Apply right-to-left so earlier offsets stay valid. A span that overlaps one already
+    // replaced (e.g. two citations on the same sentence) is skipped rather than spliced into
+    // the middle of the inserted link; every source is still listed under the report.
     const sorted = replacements.sort((a, b) => b.start - a.start || b.end - a.end);
+    let appliedFrom = Number.POSITIVE_INFINITY;
     for (const rep of sorted) {
+      if (rep.end > appliedFrom) continue;
       text = `${text.slice(0, rep.start)}${rep.link}${text.slice(rep.end)}`;
+      appliedFrom = rep.start;
     }
     text = text.replace(/\ue200[^\ue201]*\ue201/g, "");
     renderedTexts.push(text);

@@ -90,7 +90,8 @@ const BriefingAnnotation = Annotation.Root({
   research: Annotation<Research[]>,
   markdown: Annotation<string>,
   runId: Annotation<string>,
-  latencyMs: Annotation<number>,
+  /** Epoch ms when prepare_window ran; save_report records end-to-end latency from it. */
+  startedAtMs: Annotation<number>,
   telemetry: Annotation<RunTelemetry | undefined>,
 });
 
@@ -114,6 +115,7 @@ export function buildBriefingGraph(
       return {
         windowStart: start.toISOString(),
         windowEnd: end.toISOString(),
+        startedAtMs: end.getTime(),
       };
     })
     .addNode("research_news", async (state) => {
@@ -195,7 +197,7 @@ export function buildBriefingGraph(
         if (result.sources.length > 0) {
           lines.push("Sources returned by hosted search:", "");
           for (const src of result.sources) {
-            const safeTitle = src.title.replace(/[\[\]]/g, "");
+            const safeTitle = src.title.replace(/[\[\]\r\n]/g, "");
             lines.push(`- [${safeTitle}](<${src.url}>)`);
           }
           lines.push("");
@@ -228,7 +230,7 @@ export function buildBriefingGraph(
         maxInstruments: state.maxInstruments,
         markdown: state.markdown,
         research: research as unknown as Array<Record<string, unknown>>,
-        latencyMs: state.latencyMs,
+        latencyMs: Math.max(0, Date.now() - state.startedAtMs),
       });
       return { runId: run_id, telemetry };
     })
@@ -266,7 +268,15 @@ export async function runBriefing(params: {
   const days = params.days ?? 7;
   const maxInstruments = params.maxInstruments ?? 3;
   const language = params.language ?? "English";
-  if (days < 1 || days > 30 || maxInstruments < 1 || maxInstruments > 10) {
+  // Number.isInteger also rejects NaN, which slips through plain range comparisons.
+  if (
+    !Number.isInteger(days) ||
+    days < 1 ||
+    days > 30 ||
+    !Number.isInteger(maxInstruments) ||
+    maxInstruments < 1 ||
+    maxInstruments > 10
+  ) {
     throw new Error("Choose 1-30 days and 1-10 instruments.");
   }
 
@@ -286,7 +296,7 @@ export async function runBriefing(params: {
     research: [],
     markdown: "",
     runId: "",
-    latencyMs: 0,
+    startedAtMs: Date.now(),
     telemetry: undefined,
   });
 

@@ -147,6 +147,7 @@ export function validatedStatement(statement: Statement, pageCount?: number): St
   }
 
   const seen = new Map<string, Instrument>();
+  const conflicted = new Set<string>();
 
   for (const item of cloned.instruments) {
     item.symbol = item.symbol.trim().toUpperCase();
@@ -173,11 +174,19 @@ export function validatedStatement(statement: Statement, pageCount?: number): St
     const key = `${item.symbol || item.name}|${item.exchange}|${item.asset_type}`;
     const existing = seen.get(key);
     if (existing) {
-      if (existing.holding_quantity !== item.holding_quantity) {
-        existing.holding_quantity = null;
-        warnings.push(
-          `Conflicting quantities for ${item.symbol || item.name}; quantity omitted. Review the PDF.`
-        );
+      // null means "no explicit quantity on this row" (e.g. a trade line), not zero, so it
+      // never conflicts with an explicit quantity. Two different explicit quantities do
+      // conflict; the quantity is then omitted for good, whatever later rows say.
+      if (!conflicted.has(key) && item.holding_quantity !== null) {
+        if (existing.holding_quantity === null) {
+          existing.holding_quantity = item.holding_quantity;
+        } else if (Number(existing.holding_quantity) !== Number(item.holding_quantity)) {
+          existing.holding_quantity = null;
+          conflicted.add(key);
+          warnings.push(
+            `Conflicting quantities for ${item.symbol || item.name}; quantity omitted. Review the PDF.`
+          );
+        }
       }
       if (item.activity && item.activity !== existing.activity) {
         existing.activity = existing.activity ? `${existing.activity} | ${item.activity}` : item.activity;

@@ -1,7 +1,8 @@
 import crypto from "crypto";
 import { google } from "googleapis";
 import { OperationalStore } from "../db/store";
-import { readDocument } from "../agent/services";
+import type { Statement } from "../agent/models";
+import { readDocument, safeError } from "../agent/services";
 import { buildIngestionGraph, runBriefing, type ExtractorFn, type ResearcherFn } from "../agent/workflow";
 
 export const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
@@ -21,13 +22,14 @@ export function createOAuth2Client() {
   return new google.auth.OAuth2(clientId, clientSecret, redirectUri);
 }
 
-export function getGmailAuthUrl(userId: string): string {
+/** `state` must come from createOAuthState() so the callback can verify it. */
+export function getGmailAuthUrl(state: string): string {
   const oauth2Client = createOAuth2Client();
   return oauth2Client.generateAuthUrl({
     access_type: "offline",
     prompt: "consent",
     scope: [GMAIL_READONLY_SCOPE],
-    state: userId,
+    state,
   });
 }
 
@@ -243,6 +245,8 @@ export async function syncAndAnalyzeIbkrFromGmail(params: {
   extractor?: ExtractorFn;
   researcher?: ResearcherFn;
   mockAttachment?: IbkrAttachmentPayload;
+  /** Provenance recorded on the snapshot; the simulated demo inbox uses "sample". */
+  sourceType?: "gmail" | "sample";
 }): Promise<{
   syncStatus: "ingested" | "skipped_duplicate" | "no_matching_email";
   snapshotId?: string;
@@ -252,6 +256,7 @@ export async function syncAndAnalyzeIbkrFromGmail(params: {
   instrumentCount?: number;
 }> {
   const store = params.store ?? new OperationalStore();
+  const sourceType = params.sourceType ?? "gmail";
   const fetched = await fetchLatestIbkrStatementPdf({
     userId: params.userId,
     store,
@@ -271,33 +276,67 @@ export async function syncAndAnalyzeIbkrFromGmail(params: {
     };
   }
 
-  const { text, pages, piiRedactions } = await readDocument(fetched.pdfBuffer!, fetched.filename!);
-  if (Object.keys(piiRedactions).length > 0) {
+  let statement: Statement;
+  let pages: number;
+  try {
+    const document = await readDocument(fetched.pdfBuffer!, fetched.filename!);
+    pages = document.pages;
+    if (Object.keys(document.piiRedactions).length > 0) {
+      store.logEvent({
+        userId: params.userId,
+        eventType: "pii_redacted",
+        message: `Sanitized PII fields from ${fetched.filename} before cloud extraction.`,
+        severity: "info",
+        details: document.piiRedactions,
+      });
+    }
+
+    const ingested = await buildIngestionGraph(params.extractor).invoke({
+      text: document.text,
+      pageCount: document.pages,
+    });
+    if (!ingested.statement) {
+      throw new Error("Ingestion graph returned no statement");
+    }
+    statement = ingested.statement;
+  } catch (err) {
+    // Record the failure so it is visible in the audit trail. The attachment stays
+    // unprocessed, so the next sync retries it.
+    const message = safeError(err);
+    store.recordIngestionJob({
+      userId: params.userId,
+      sourceType,
+      sourceMessageId: fetched.messageId,
+      attachmentSha256: fetched.sha256!,
+      filename: fetched.filename!,
+      status: "failed",
+      errorMessage: message,
+    });
+    if (!params.mockAttachment) {
+      store.updateOAuthSyncStatus(params.userId, "ingestion_failed");
+    }
     store.logEvent({
       userId: params.userId,
-      eventType: "pii_redacted",
-      message: `Sanitized PII fields from ${fetched.filename} before cloud extraction.`,
-      severity: "info",
-      details: piiRedactions,
+      eventType: "gmail_ingestion_failed",
+      message: `Could not ingest ${fetched.filename}: ${message}`,
+      severity: "error",
+      details: { messageId: fetched.messageId },
     });
+    throw err;
   }
 
-  const graph = buildIngestionGraph(params.extractor);
-  const ingested = await graph.invoke({ text, pageCount: pages });
-  const statement = ingested.statement!;
-
-  // Automated Gmail sync saves as unconfirmed (confirmed=false) until human review,
-  // unless downstream policy allows auto-briefing on read-only dashboard.
+  // Synced statements are saved unconfirmed (confirmed=false) until a human reviews them;
+  // the delivery outbox refuses to send briefings built from unconfirmed snapshots.
   const { snapshot_id } = store.saveSnapshot({
     userId: params.userId,
     statement,
     confirmed: false,
-    sourceType: "gmail",
+    sourceType,
   });
 
   store.recordIngestionJob({
     userId: params.userId,
-    sourceType: "gmail",
+    sourceType,
     sourceMessageId: fetched.messageId,
     attachmentSha256: fetched.sha256!,
     filename: fetched.filename!,
@@ -308,7 +347,9 @@ export async function syncAndAnalyzeIbkrFromGmail(params: {
   store.logEvent({
     userId: params.userId,
     eventType: "gmail_ibkr_ingested",
-    message: `Ingested IBKR statement ${fetched.filename} (${statement.instruments.length} instruments) from Gmail.`,
+    message: `Ingested IBKR statement ${fetched.filename} (${statement.instruments.length} instruments) from ${
+      sourceType === "sample" ? "the simulated demo inbox" : "Gmail"
+    }.`,
     severity: "info",
     details: { snapshot_id, messageId: fetched.messageId, pages },
   });
