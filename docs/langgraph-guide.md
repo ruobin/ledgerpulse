@@ -21,7 +21,7 @@ Think of a LangGraph `StateGraph` as a **typed state machine** made of three bui
 
 ## 2. The Ingestion Graph (`buildIngestionGraph`)
 
-Defined in [`src/lib/agent/workflow.ts`](../src/lib/agent/workflow.ts#L53-L78).
+Defined in [`src/lib/agent/workflow.ts`](../src/lib/agent/workflow.ts) (`IngestionAnnotation` and `buildIngestionGraph`).
 
 ```mermaid
 flowchart LR
@@ -50,7 +50,7 @@ flowchart LR
    - Calls `validatedStatement(state.statement, state.pageCount)` ([`models.ts`](../src/lib/agent/models.ts)):
      - Rejects any extracted `source_page > state.pageCount`.
      - Forces `holding_quantity = null` and `as_of = null` if `kind !== "holdings"` (so trade activity never masquerades as current holdings).
-     - Deduplicates instruments and nulls conflicting quantities with an explicit warning.
+     - Deduplicates instruments. A row without a quantity never overrides one with a quantity; two *different* explicit quantities are nulled with an explicit warning.
 4. **Dependency Injection for Testing**:
    - Notice `buildIngestionGraph(extractor = ...)` accepts a custom `extractor` function! That lets `evals.ts` and `vitest` test the entire graph offline at `$0` API cost by passing a fake extractor.
 
@@ -58,7 +58,7 @@ flowchart LR
 
 ## 3. The Briefing Graph (`buildBriefingGraph`)
 
-Defined in [`src/lib/agent/workflow.ts`](../src/lib/agent/workflow.ts#L80-L246).
+Defined in [`src/lib/agent/workflow.ts`](../src/lib/agent/workflow.ts) (`BriefingAnnotation` and `buildBriefingGraph`).
 
 ```mermaid
 flowchart TD
@@ -73,9 +73,9 @@ flowchart TD
 ### Step-by-Step Walkthrough
 
 1. **State Definition (`BriefingAnnotation`)**:
-   - Carries inputs (`userId`, `statement`, `confirmed`, `snapshotId`, `days`, `language`, `maxInstruments`) and outputs populated along the way (`windowStart`, `windowEnd`, `research`, `markdown`, `runId`, `telemetry`).
+   - Carries inputs (`userId`, `statement`, `confirmed`, `snapshotId`, `days`, `language`, `maxInstruments`) and outputs populated along the way (`windowStart`, `windowEnd`, `startedAtMs`, `research`, `markdown`, `runId`, `telemetry`).
 2. **Node 1 — `prepare_window`**:
-   - Deterministic date math: computes `windowEnd = now` and `windowStart = now - days` in UTC ISO format.
+   - Deterministic date math: computes `windowEnd = now` and `windowStart = now - days` in UTC ISO format, and stamps `startedAtMs` so `save_report` can record the run's end-to-end latency.
 3. **Conditional Edge (`.addConditionalEdges`)**:
    - Inspects `state.statement.instruments.length`:
      - If `> 0`, routes to `"research_news"`.
@@ -90,19 +90,19 @@ flowchart TD
      2. **Citation Gate (`normalizeResearchFromResponse`)**: Requires `search_calls > 0` and at least one valid `http`/`https` citation annotation; otherwise marks `status: "unverified"`.
      3. **Two-Stage Synthesis (`synthesizeResearch`)**:
         - **Stage 1 (`EvidenceSchema`)**: Extracts `NewsFact[]` with dates and `source_ids`.
-        - **Deterministic Python/TS Gate (`eligibleNews`)**: Drops undated, out-of-window, or invalid-source facts.
+        - **Deterministic TypeScript gate (`eligibleNews`)**: Drops undated, out-of-window, or invalid-source facts.
         - **Stage 2 (`ScenariosSchema`)**: Runs *only* if accepted facts remain, receiving **only** `accepted_news` (zero contamination from rejected articles).
 5. **Node 3 — `render_markdown`**:
    - Deterministic template builder: formats the Markdown report, omits prose for `status === "unverified"` items, prints snapshot age warnings, and lists any tickers skipped by `maxInstruments`.
 6. **Node 4 — `save_report`**:
-   - Calls `activeStore.recordRun(...)` ([`db/store.ts`](../src/lib/db/store.ts)) to persist the Markdown report, token/USD telemetry, and guardrail audit events (`dated_evidence_filtered`, `unverified_withheld`, `research_failure_isolated`) into SQLite.
+   - Calls `activeStore.recordRun(...)` ([`db/store.ts`](../src/lib/db/store.ts)) to persist the Markdown report, token/USD/latency telemetry, and guardrail audit events (`dated_evidence_filtered`, `unverified_withheld`, `research_failure_isolated`) into SQLite.
 
 ---
 
 ## 4. How `runBriefing()` Calls the Graph
 
-In [`runBriefing()`](../src/lib/agent/workflow.ts#L248-L306):
-- Validates bounds (`1 <= days <= 30`, `1 <= maxInstruments <= 10`).
+In [`runBriefing()`](../src/lib/agent/workflow.ts):
+- Validates bounds (integer `1 <= days <= 30`, integer `1 <= maxInstruments <= 10`; `NaN` is rejected).
 - Compiles the graph with `buildBriefingGraph(params.researcher, params.store)`.
 - Invokes `.invoke({ ...initialState })` and returns `{ runId, markdown, research, telemetry, windowStart, windowEnd }`.
 
