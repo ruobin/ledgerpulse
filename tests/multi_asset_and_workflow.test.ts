@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { LengthFinishReasonError } from "openai/error";
 import { type Instrument, type Statement, validatedStatement } from "@/lib/agent/models";
 import { extractStatement, researchInstrument, synthesizeResearch } from "@/lib/agent/services";
 import { buildIngestionGraph, runBriefing } from "@/lib/agent/workflow";
@@ -138,9 +139,7 @@ describe("LedgerPulse Multi-Asset & Workflow Integration Tests", () => {
     const extracted = await extractStatement(rawText, async (segment) => {
       // Force batch splitting when the segment contains more than 35 lines
       if (segment.split("\n").length > 35) {
-        const err = new Error("Output token cap reached");
-        err.name = "LengthFinishReasonError";
-        throw err;
+        throw new LengthFinishReasonError();
       }
 
       const matched: Instrument[] = [];

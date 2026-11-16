@@ -19,6 +19,7 @@ flowchart TB
         UI3["/briefings (Report generator and reader)"]
         UI4["/automation (Gmail OAuth and schedule)"]
         UI5["/ops (Guardrail eval scorecard)"]
+        UI6["/admin (Admin Console: provider, models, web search)"]
     end
 
     subgraph API["Route handlers (/api/*), Zod-validated input"]
@@ -26,6 +27,7 @@ flowchart TB
         A2["/api/briefings"]
         A3["/api/gmail/auth, /callback, /sync"]
         A4["/api/schedules, /api/evals, /api/health"]
+        A5["/api/admin/settings, /test"]
     end
 
     subgraph Worker["Background worker (src/worker/scheduler.ts)"]
@@ -34,9 +36,15 @@ flowchart TB
 
     subgraph Core["Domain core (src/lib/)"]
         G1["Ingestion graph (LangGraph)<br/>unpdf -> redactPii -> extractStatement -> validatedStatement"]
-        G2["Briefing graph (LangGraph)<br/>web_search -> citation gate -> Stage 1 evidence<br/>-> TypeScript date/source gate -> Stage 2 scenarios"]
+        G2["Briefing graph (LangGraph)<br/>web search -> citation gate -> Stage 1 evidence<br/>-> TypeScript date/source gate -> Stage 2 scenarios"]
         GM["Gmail connector (googleapis)<br/>AES-256-GCM tokens, OAuth state cookie, SHA-256 dedup"]
+        CFG["AI settings<br/>Admin Console > .env > defaults<br/>(encrypted secrets in app_settings)"]
         DB[("SQLite operational store (WAL)<br/>user_id-scoped")]
+    end
+
+    subgraph External["External services"]
+        LLM["OpenAI or an OpenAI-compatible gateway<br/>(per-task models)"]
+        BRAVE["Brave Search API<br/>(when WEB_SEARCH_PROVIDER=brave)"]
     end
 
     CADDY --> GATE --> Client
@@ -51,9 +59,14 @@ flowchart TB
     GM --> DB
     G1 --> DB
     G2 --> DB
+    API --> CFG
+    CFG --> DB
+    G1 --> LLM
+    G2 --> LLM
+    G2 --> BRAVE
 ```
 
-The web app and the worker are separate processes (separate containers in Docker) that share only the SQLite database volume.
+The web app and the worker are separate processes (separate containers in Docker) that share only the SQLite database volume. AI settings are read from that database on every model call, so a change saved in the Admin Console reaches both processes without a restart.
 
 ---
 
@@ -66,7 +79,8 @@ The web app and the worker are separate processes (separate containers in Docker
 | **Schema & invariants** | `portfolio_agent/models.py` (Pydantic v2) | `src/lib/agent/models.ts` (strict Zod + `zodResponseFormat`) |
 | **PDF parsing & PII** | `pypdf` + regex (`services.py`) | `unpdf` + `redactPii()` (`src/lib/agent/services.ts`, `src/lib/telemetry.ts`) |
 | **Orchestration** | `langgraph` Python `StateGraph` | `@langchain/langgraph` TypeScript `StateGraph` (`src/lib/agent/workflow.ts`) |
-| **Web search & synthesis** | `ChatOpenAI` + `web_search` | `openai.responses.create` (`web_search_preview`, `max_tool_calls: 2`, `store: false`) |
+| **Model provider** | OpenAI only | Any OpenAI-compatible endpoint: OpenAI directly or an API gateway (OpenRouter, LiteLLM, Cloudflare AI Gateway, Azure OpenAI v1, …), with separate models for extraction, analysis and research, configurable in the Admin Console |
+| **Web search & synthesis** | `ChatOpenAI` + `web_search` | Responses API `web_search_preview` (`max_tool_calls: 2`, `store: false`), Chat Completions `web_search_options` with `url_citation` annotations, or the Brave Search API |
 | **Email ingestion** | Manual upload only | Gmail OAuth2 (`gmail.readonly`) + SHA-256 deduplication (`src/lib/gmail/client.ts`) |
 | **Operational store** | Local SQLite (`data/app.sqlite`) | `user_id`-scoped SQLite WAL (`src/lib/db/store.ts`) |
 | **Scheduler** | None (manual CLI/UI) | `worker` container: cron per user/timezone, durable `run_leases` (`src/worker/scheduler.ts`) |
@@ -101,4 +115,5 @@ LedgerPulse is ready for a single VPS today and keeps clear seams for growth:
 3. **Worker (polling loop → queue)**
    - The worker polls schedules and coordinates through SQLite leases. At higher scale the same due-check can enqueue `(userId, occurrence)` jobs into Redis/BullMQ so several stateless workers process syncs and research in parallel.
 4. **Cost and rate-limit governance**
-   - Every run enforces `maxInstruments` (1–10) and `max_tool_calls: 2` per instrument, and `briefing_runs` records token usage and estimated USD spend per `user_id`, ready for quotas or billing.
+   - Every run enforces `maxInstruments` (1–10) and one research request per instrument (at most 2 hosted searches in `responses` mode). `briefing_runs` records token usage and estimated USD spend per `user_id`, ready for quotas or billing.
+   - An API gateway in front of the models can add central key management, caching, rate limits, spend caps or provider fallbacks (depending on the gateway) without code changes; only the `LLM_*` settings change.

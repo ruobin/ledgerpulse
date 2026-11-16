@@ -7,6 +7,7 @@ import {
   type Statement,
   validatedStatement,
 } from "./models";
+import { describeAiSetup } from "./llm";
 import * as services from "./services";
 
 function escapeCell(value: unknown): string {
@@ -183,19 +184,19 @@ export function buildBriefingGraph(
         lines.push(
           `### ${result.instrument}`,
           "",
-          `Research status: **${result.status}**; hosted search calls: ${result.search_calls}.`,
+          `Research status: **${result.status}**; web search calls: ${result.search_calls}.`,
           ""
         );
         if (result.status === "unverified") {
           lines.push(
-            "No verifiable hosted search/citation metadata was returned. Analysis omitted; rerun or research manually.",
+            "No search results with verifiable citations were returned. Analysis omitted; rerun or research manually.",
             ""
           );
         } else {
           lines.push(result.markdown, "");
         }
         if (result.sources.length > 0) {
-          lines.push("Sources returned by hosted search:", "");
+          lines.push("Sources returned by web search:", "");
           for (const src of result.sources) {
             const safeTitle = src.title.replace(/[\[\]\r\n]/g, "");
             lines.push(`- [${safeTitle}](<${src.url}>)`);
@@ -213,11 +214,11 @@ export function buildBriefingGraph(
           ""
         );
       }
-      lines.push("---", `Model: ${services.modelName(true)}`, "");
+      lines.push("---", describeAiSetup().footer, "");
       return { markdown: lines.join("\n") };
     })
     .addNode("save_report", async (state) => {
-      const model = services.modelName(true);
+      const model = describeAiSetup().runModel;
       const research = state.research ?? [];
       const { run_id, telemetry } = activeStore.recordRun({
         userId: state.userId,
@@ -303,7 +304,7 @@ export async function runBriefing(params: {
   const elapsed = Math.round(performance.now() - t0);
   const telemetry =
     result.telemetry ??
-    computeRunTelemetry(result.research, services.modelName(true), elapsed);
+    computeRunTelemetry(result.research, describeAiSetup().runModel, elapsed);
 
   return {
     runId: result.runId,

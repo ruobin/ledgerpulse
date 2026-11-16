@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { LengthFinishReasonError } from "openai/error";
 import { OperationalStore } from "../db/store";
 import { syncAndAnalyzeIbkrFromGmail } from "../gmail/client";
 import { decryptSecret, encryptSecret, redactPii } from "../telemetry";
@@ -109,9 +110,8 @@ async function evalIngestionGuardrails(): Promise<EvalSuite> {
   const extracted = await services.extractStatement(oversized, async (segment, _ctx, budget) => {
     budgets.push(budget);
     if (segment.length > 1800) {
-      const err = new Error("Truncated");
-      err.name = "LengthFinishReasonError";
-      throw err;
+      // The SDK's real error: its `name` is "Error", so this proves class-based detection.
+      throw new LengthFinishReasonError();
     }
     if (!segment.includes("[PAGE 9]")) {
       throw new Error("Lost page marker");
