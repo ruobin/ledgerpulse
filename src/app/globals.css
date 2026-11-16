@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Provides the `prose` classes used to render briefing Markdown on /briefings. */
+@plugin "@tailwindcss/typography";
 
 :root {
   --background: #090d16;
