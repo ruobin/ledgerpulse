@@ -1,10 +1,10 @@
 # LedgerPulse — Low-Level Design (LLD)
 
-This document details the database schema, state machines, Gmail OAuth2 & deduplication sequence, and two-stage evidence isolation contracts so engineers can understand and extend the codebase quickly.
+This document covers the database schema, the scheduled Gmail sync sequence, and the contracts of each module, so engineers can understand and extend the codebase quickly.
 
 ---
 
-## 1. Relational Data Model (`src/lib/db/store.ts`)
+## 1. Relational data model (`src/lib/db/store.ts`)
 
 ```mermaid
 erDiagram
@@ -37,10 +37,11 @@ erDiagram
         text user_id FK
         text source_type
         text source_message_id
-        text attachment_sha256
+        text attachment_sha256 "UNIQUE with user_id"
         text filename
-        text status
+        text status "completed | failed"
         text snapshot_id
+        text error_message
     }
     snapshots {
         text snapshot_id PK
@@ -50,29 +51,34 @@ erDiagram
         text as_of
         integer user_confirmed
         integer instrument_count
+        text source_type "gmail | upload | paste | sample"
         text payload_json
     }
     briefing_runs {
         text run_id PK
         text user_id FK
-        text snapshot_id FK
+        text snapshot_id
         text created_at
         integer confirmed
         text model
         integer total_tokens
         real estimated_cost_usd
         integer excluded_news_count
+        integer latency_ms
         text markdown
     }
     schedules {
         text schedule_id PK
-        text user_id FK
+        text user_id FK "UNIQUE"
         integer enabled
+        text cron_expression
         integer trading_days_only
         text timezone
         integer news_window_days
         integer max_instruments
         text gmail_query
+        text last_run_at
+        text updated_at
     }
     run_leases {
         text job_key PK
@@ -91,67 +97,108 @@ erDiagram
     }
 ```
 
+Notes:
+
+- `briefing_runs.snapshot_id`, `audit_events.user_id` and `delivery_outbox.user_id` are logical references without foreign-key constraints.
+- `audit_events.event_key` is `UNIQUE`; events written with a key (for example `schedule-invalid:{userId}:{updated_at}`) are recorded at most once.
+- The store opens a short-lived connection per call with `journal_mode=WAL` and `foreign_keys=ON`, so the web and worker processes can share the file safely.
+
 ---
 
-## 2. Gmail IBKR Auto-Sync & Deduplication Sequence
+## 2. Scheduled Gmail sync sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Sched as Worker / User (/api/gmail/sync)
+    participant W as Worker (runSchedulerTick)
     participant Store as OperationalStore (SQLite)
-    participant Crypto as AES-256-GCM (telemetry.ts)
-    participant Gmail as Google Gmail API v1
-    participant Ingest as Ingestion Graph (LangGraph)
+    participant Gmail as Gmail API v1
+    participant Ingest as Ingestion graph
+    participant Brief as Briefing graph
 
-    Sched->>Store: acquireLease("daily-ibkr:{userId}:{YYYY-MM-DD}")
+    W->>Store: listEnabledSchedules()
+    W->>W: isScheduleDue(): latest cron occurrence (schedule timezone, 24h catch-up) > last_run_at?
+    alt Not due, or Gmail not connected
+        W-->>W: skip (occurrence not consumed)
+    end
+    W->>Store: acquireLease("scheduled-sync:{userId}", unique owner)
     alt Lease held by another worker
-        Store-->>Sched: false (exit cleanly)
+        Store-->>W: false (skip)
     end
-    Sched->>Store: getOAuthConnection(userId, "gmail")
-    Store->>Crypto: decryptSecret(encrypted_refresh_token)
-    Crypto-->>Sched: plaintext refresh_token
-    Sched->>Gmail: users.messages.list(q="from:donotreply@interactivebrokers.com ...")
-    Gmail-->>Sched: messageId
-    Sched->>Gmail: users.messages.attachments.get(messageId, attachmentId)
-    Gmail-->>Sched: PDF bytes
-    Sched->>Sched: sha256 = SHA256(pdfBuffer)
-    Sched->>Store: hasProcessedAttachment(userId, sha256)
-    alt Already processed
-        Store-->>Sched: { processed: true, snapshotId }
-        Sched->>Store: logEvent("gmail_dedup_skipped")
-    else New Daily Statement
-        Sched->>Ingest: readDocument() -> extractStatement() -> validatedStatement()
-        Ingest-->>Sched: Statement (activity != holdings enforced)
-        Sched->>Store: saveSnapshot(confirmed=false, sourceType="gmail")
-        Sched->>Store: recordIngestionJob(sha256, status="completed")
+    W->>Store: getSchedule() and re-check due (another worker may have finished it)
+    W->>Store: getOAuthConnection() (AES-256-GCM decrypt)
+    W->>Gmail: users.messages.list(q = schedule.gmail_query), newest message only
+    W->>Gmail: users.messages.get + attachments.get (first PDF part)
+    W->>W: sha256(attachment)
+    W->>Store: hasProcessedAttachment(userId, sha256)
+    alt Already ingested
+        Store-->>W: { processed: true, snapshotId } (log gmail_dedup_skipped)
+    else New statement
+        W->>Ingest: readDocument() -> redactPii() -> extractStatement() -> validatedStatement()
+        alt Ingestion fails
+            W->>Store: recordIngestionJob(status="failed") + gmail_ingestion_failed event
+        else Success
+            W->>Store: saveSnapshot(confirmed=false, sourceType="gmail")
+            W->>Store: recordIngestionJob(status="completed")
+            W->>Brief: runBriefing(days, maxInstruments, language from schedule)
+        end
     end
-    Sched->>Store: releaseLease(...)
+    W->>Store: updateSchedule(last_run_at = tick time), also after a failure
+    W->>Store: releaseLease()
 ```
+
+The Automation page's sync button (`POST /api/gmail/sync`) runs the same sync without a lease or a briefing. When Gmail is not configured or not connected, it uses a built-in fictional statement instead, saved with `source_type = "sample"`.
 
 ---
 
-## 3. Module-by-Module Reference
+## 3. Module reference
 
 ### `src/lib/agent/models.ts`
-- **`InstrumentSchema` & `StatementSchema`**: Strict Zod schemas (`strict()`) compiled to OpenAI JSON Schema via `zodResponseFormat`.
+- **`InstrumentSchema` / `StatementSchema`**: strict Zod schemas compiled to OpenAI JSON Schema via `zodResponseFormat`.
 - **`validatedStatement(statement, pageCount?)`**:
-  - Forces `holding_quantity = null` and `as_of = null` whenever `statement.kind !== "holdings"`.
-  - Rejects `source_page > pageCount`.
-  - Deduplicates instruments by `(symbol || name, exchange, asset_type)` and nulls `holding_quantity` with a warning if duplicate rows disagree.
+  - Forces `holding_quantity = null` and `as_of = null` whenever `kind !== "holdings"`, and drops invalid `as_of` dates with a warning.
+  - Rejects `source_page > pageCount` and quantities that are not finite decimals (thousands separators are removed).
+  - Merges duplicates by `(symbol || name, exchange, asset_type)`. A `null` quantity means "not stated on this row" and never overrides an explicit one; numerically equal quantities (`"250"` and `"250.0000"`) agree; two different explicit quantities null the quantity permanently, with a warning.
 
 ### `src/lib/agent/services.ts`
-- **`readDocument(data, filename)`**: Checks 10 MB / 80-page limits, verifies `%PDF-` signature, extracts per-page text via `unpdf`, rejects scanned/empty pages (`< 10 chars`), tags pages `[PAGE N]`, and runs `redactPii()`.
-- **`extractStatement(text)`**: Adaptive truncation recovery. Starts at `max_tokens: 5000`; on `LengthFinishReasonError`, retries at `16000`; if still truncated, calls `splitBatch()` on `\n` boundaries while re-injecting the active `[PAGE N]` marker and document header (`text.slice(0, 800)`).
+- **`readDocument(data, filename)`**: enforces the 10 MB, 80-page and 120,000-character limits, verifies the `%PDF-` signature, rejects pages with under 10 characters of text (scans; no OCR), tags pages `[PAGE N]`, and runs `redactPii()`.
+- **`extractStatement(text)`**: adaptive truncation recovery, starting at `max_tokens: 5000`. On `LengthFinishReasonError` it retries at `16000`, then calls `splitBatch()` on a line boundary, re-injecting the active `[PAGE N]` marker, and passes the first 800 characters as untrusted context to continuation batches (recursion depth ≤ 4).
+- **`normalizeResearchFromResponse()`**: keeps only `url_citation` annotations whose URL normalizes to a credential-free `http(s)` href, replaces annotated spans with Markdown links right-to-left, and skips any span overlapping one already replaced. Every source is still listed in the report. Status is `cited` only when there was at least one search call and one valid source.
 - **`synthesizeResearch(result, startIso, endIso, language)`**:
-  - **Stage 1 (`EvidenceSchema`)**: Extracts `NewsFact[]` with explicit `publication_date` and `source_ids`.
-  - **Deterministic Gate (`eligibleNews()`)**: Rejects `publication_date === null`, dates outside `[startIso, endIso]` (UTC calendar-day granularity), and out-of-range `source_ids`.
-  - **Stage 2 (`ScenariosSchema`)**: Invoked *only* if `accepted.length > 0`, receiving only `accepted_news`—never raw search text or rejected articles.
+  - **Stage 1 (`EvidenceSchema`)**: extracts `NewsFact[]` with an explicit `publication_date` and `source_ids`.
+  - **Deterministic gate (`eligibleNews()`)**: drops facts with no date, a date outside `[startIso, endIso]` (whole UTC calendar days), or no valid source id.
+  - **Stage 2 (`ScenariosSchema`)**: runs only if accepted facts remain, and sees only `accepted_news`, never raw search text or rejected facts.
 
 ### `src/lib/agent/workflow.ts`
 - **`buildIngestionGraph()`**: `START -> extract_instruments -> validate_extraction -> END`.
-- **`buildBriefingGraph()`**: `START -> prepare_window -> (conditional: research_news | render_markdown) -> render_markdown -> save_report -> END`.
+- **`buildBriefingGraph()`**: `START -> prepare_window -> (conditional: research_news | render_markdown) -> render_markdown -> save_report -> END`. `prepare_window` stamps `startedAtMs`, and `save_report` records end-to-end latency from it.
+- **`runBriefing()`** rejects non-integer or out-of-range bounds (`1–30` days, `1–10` instruments), including `NaN`.
+
+### `src/lib/cron.ts`
+- Dependency-free 5-field cron (`*`, values, ranges, lists, steps, `JAN`–`DEC`/`SUN`–`SAT`, weekday `7` = Sunday; day-of-month and day-of-week are OR-ed when both are restricted, as in Vixie cron).
+- **`mostRecentFireTime(expr, timeZone, now, lookbackMinutes, accept?)`** walks back over real UTC minutes and evaluates each in the timezone, so DST transitions need no special cases.
+
+### `src/worker/scheduler.ts`
+- **`isScheduleDue(schedule, now)`**, **`runSchedulerTick(store, { now?, sync? })`**: see the sequence above. Each schedule is isolated: an invalid stored timezone or cron produces one `schedule_invalid` audit event per schedule revision and never blocks other users. Returns one `TickResult` per schedule (`not_due`, `gmail_not_connected`, `locked`, `completed`, `failed`, `invalid_schedule`).
+
+### `src/lib/db/store.ts`
+- **`acquireLease(key, owner, ttl)`**: a single atomic UPSERT that takes the lease only if it is free, expired, or already held by the same owner (renewal). Owners must be unique per attempt.
+- **`recordIngestionJob()`**: upserts by `(user_id, attachment_sha256)` but never demotes a `completed` job, so a later failure cannot cause re-ingestion.
+- **`updateSchedule()`**: trusted internal API (the worker writes `last_run_at` through it); HTTP input goes through `SchedulePatchSchema` first.
+
+### `src/lib/validation.ts`
+- **`SchedulePatchSchema`**: the fields a client may change (cron, timezone, flags, bounds, language, query, delivery). It strips unknown keys, so the UI can PUT back the record it fetched without overwriting `last_run_at`, `schedule_id` or `user_id`.
+- **`BriefingRequestSchema`**: `snapshotId`, integer `days` (1–30) and `maxInstruments` (1–10), `language`.
+
+### `src/lib/gmail/client.ts` and `src/lib/gmail/oauth-state.ts`
+- `GET /api/gmail/auth` issues `state = base64url({ n: nonce, u: userId })` and stores the nonce in the HttpOnly, SameSite=Lax cookie `lp_gmail_oauth_state` (path `/api/gmail`, 10 minutes). `/api/gmail/callback` links an account only when the state's nonce matches the cookie and the user id is well-formed, then clears the cookie.
+- `syncAndAnalyzeIbkrFromGmail()` records failed ingestions (`ingestion_jobs.status = "failed"`, `gmail_ingestion_failed` event) and rethrows; the attachment remains unprocessed and is retried by the next sync.
+
+### `src/lib/access.ts` and `src/middleware.ts`
+- **`checkAccess(authorization, env)`**: HTTP Basic check against `APP_USERNAME` (default `admin`) / `APP_PASSWORD` using constant-time comparison. With no password it allows requests outside production, and in production it returns `503` unless `APP_AUTH_DISABLED=true`.
+- The middleware runs on the Node.js runtime, so credentials are read from the runtime environment, and it exempts only `/api/health`.
 
 ### `src/lib/telemetry.ts`
-- **`redactPii(text)`**: Strips `Account Number/Holder`, `Address`, `Email`, `Phone`, `Tax ID/SSN`, `IBAN/SWIFT`, and inline email addresses.
-- **`encryptSecret` / `decryptSecret`**: AES-256-GCM authenticated encryption using `TOKEN_ENCRYPTION_KEY` (32-byte hex).
+- **`redactPii(text)`**: removes labelled personal lines (`Account Number/ID/Holder/Name`, `Address`, `Email`, `Phone`, `Tax ID`, `SSN`, `TIN`, `IBAN`, `SWIFT`), SSN/TIN patterns, inline emails, and IBKR account ids (`U1234567`, `DU1234567`).
+- **`encryptSecret` / `decryptSecret`**: AES-256-GCM with `TOKEN_ENCRYPTION_KEY` (64 hex chars). A malformed key is an error, never silently replaced. Production requires the key; outside production a key derived from `OPENAI_API_KEY` is used. Decrypting with a changed key fails with a "reconnect Gmail" message.
+- **`computeRunTelemetry()` / `estimateCostUsd()`**: per-run status counts, citation rate, tokens, search calls and estimated USD cost.

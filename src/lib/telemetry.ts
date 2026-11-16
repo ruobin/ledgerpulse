@@ -23,6 +23,9 @@ const PII_PATTERNS: Array<[string, RegExp]> = [
   ],
   ["ssn_or_tin", /\b\d{3}-\d{2}-\d{4}\b/g],
   ["inline_email", /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g],
+  // IBKR live (U1234567) and paper (DU1234567) account ids, which statement headers print
+  // without a "Number:" label. ISINs such as US0378331005 do not match.
+  ["ibkr_account_id", /\b(?:DU|U)\d{5,9}\b/g],
 ];
 
 export function redactPii(text: string): { sanitized: string; counts: Record<string, number> } {
@@ -138,12 +141,24 @@ export function computeRunTelemetry(
   };
 }
 
+const KEY_HELP = "Generate one with: openssl rand -hex 32";
+
+/**
+ * AES-256 key for OAuth tokens at rest. A configured key must be valid (it is never silently
+ * replaced), and production refuses to run without one. Outside production a derived key is
+ * used so local development works out of the box; it changes whenever OPENAI_API_KEY does.
+ */
 function resolveEncryptionKey(): Buffer {
-  const hex = process.env.TOKEN_ENCRYPTION_KEY?.trim();
-  if (hex && /^[0-9a-fA-F]{64}$/.test(hex)) {
-    return Buffer.from(hex, "hex");
+  const configured = process.env.TOKEN_ENCRYPTION_KEY?.trim();
+  if (configured) {
+    if (!/^[0-9a-fA-F]{64}$/.test(configured)) {
+      throw new Error(`TOKEN_ENCRYPTION_KEY must be 64 hex characters (32 bytes). ${KEY_HELP}`);
+    }
+    return Buffer.from(configured, "hex");
   }
-  // Deterministic local fallback for development only; production VPS must set TOKEN_ENCRYPTION_KEY
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(`TOKEN_ENCRYPTION_KEY is required in production to encrypt Gmail OAuth tokens. ${KEY_HELP}`);
+  }
   const seed = process.env.OPENAI_API_KEY?.trim() || "ledgerpulse-local-dev-ephemeral-key";
   return crypto.createHash("sha256").update(seed).digest();
 }
@@ -163,11 +178,19 @@ export function decryptSecret(payload: string): string {
     throw new Error("Malformed encrypted secret payload");
   }
   const key = resolveEncryptionKey();
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivB64, "base64"));
-  decipher.setAuthTag(Buffer.from(tagB64, "base64"));
-  const decrypted = Buffer.concat([
-    decipher.update(Buffer.from(dataB64, "base64")),
-    decipher.final(),
-  ]);
-  return decrypted.toString("utf8");
+  try {
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivB64, "base64"));
+    decipher.setAuthTag(Buffer.from(tagB64, "base64"));
+    const decrypted = Buffer.concat([
+      decipher.update(Buffer.from(dataB64, "base64")),
+      decipher.final(),
+    ]);
+    return decrypted.toString("utf8");
+  } catch {
+    throw new Error(
+      "Stored Gmail credentials cannot be decrypted with the current encryption key " +
+        "(TOKEN_ENCRYPTION_KEY, or OPENAI_API_KEY in development, likely changed since Gmail " +
+        "was connected). Reconnect Gmail on the Automation page."
+    );
+  }
 }

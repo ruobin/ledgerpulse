@@ -13,6 +13,7 @@ services:
     volumes:
       - ledgerpulse_data:/app/data
     ports:
+      # Loopback only: public traffic must go through Caddy (TLS).
       - "127.0.0.1:3000:3000"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
@@ -34,6 +35,10 @@ services:
       - DATA_DIR=/app/data
     volumes:
       - ledgerpulse_data:/app/data
+    # The image's HEALTHCHECK probes the web server on :3000, which the worker does not run;
+    # inheriting it would mark this container unhealthy forever.
+    healthcheck:
+      disable: true
     depends_on:
       web:
         condition: service_healthy
@@ -42,6 +47,9 @@ services:
     image: caddy:2-alpine
     container_name: ledgerpulse-caddy
     restart: unless-stopped
+    environment:
+      # Read by the Caddyfile. Compose takes it from the shell or from .env.
+      - APP_DOMAIN=${APP_DOMAIN:-localhost}
     ports:
       - "80:80"
       - "443:443"

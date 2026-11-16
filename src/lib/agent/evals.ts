@@ -4,7 +4,7 @@ import path from "path";
 import { OperationalStore } from "../db/store";
 import { syncAndAnalyzeIbkrFromGmail } from "../gmail/client";
 import { decryptSecret, encryptSecret, redactPii } from "../telemetry";
-import { type Instrument, type Research, type Statement, validatedStatement } from "./models";
+import { type Instrument, type Research, validatedStatement } from "./models";
 import * as services from "./services";
 import { buildIngestionGraph, runBriefing } from "./workflow";
 
@@ -309,14 +309,21 @@ async function evalSecurityAndPermissions(): Promise<EvalSuite> {
     detail: "Strips account numbers, tax IDs, and inline emails while preserving trade rows",
   });
 
-  // 2. AES-256-GCM OAuth token encryption at rest
-  const secret = "1//0gRefreshTokenExampleSecretValue";
-  const cipher = encryptSecret(secret);
-  const plain = decryptSecret(cipher);
+  // 2. AES-256-GCM OAuth token encryption at rest (fails, rather than throws, when the
+  //    deployment's TOKEN_ENCRYPTION_KEY is missing or malformed)
+  let encryptionPassed = false;
+  let encryptionDetail = "Gmail refresh tokens encrypted with AES-256-GCM at rest";
+  try {
+    const secret = "1//0gRefreshTokenExampleSecretValue";
+    const cipher = encryptSecret(secret);
+    encryptionPassed = cipher !== secret && !cipher.includes(secret) && decryptSecret(cipher) === secret;
+  } catch (err) {
+    encryptionDetail = `Token encryption unavailable: ${err instanceof Error ? err.message : "unknown error"}`;
+  }
   checks.push({
     name: "oauth_token_aes256_gcm_encryption",
-    passed: cipher !== secret && !cipher.includes(secret) && plain === secret,
-    detail: "Gmail refresh tokens encrypted with AES-256-GCM at rest",
+    passed: encryptionPassed,
+    detail: encryptionDetail,
   });
 
   // 3. URL scheme & credential rejection

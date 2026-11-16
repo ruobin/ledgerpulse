@@ -1,5 +1,7 @@
-# Replace {$APP_DOMAIN} with your VPS domain (e.g. ledgerpulse.yourdomain.com)
-# For local IP-only testing, use :80 instead of {$APP_DOMAIN}
+# APP_DOMAIN is passed in by docker-compose (set it in .env), e.g. ledgerpulse.yourdomain.com.
+# Caddy obtains and renews a Let's Encrypt certificate for it automatically.
+# It defaults to localhost (served with Caddy's internal CA) for local testing.
+# Sign-in is enforced by the app itself (APP_PASSWORD, see src/middleware.ts).
 {$APP_DOMAIN:localhost} {
     encode gzip zstd
     reverse_proxy web:3000

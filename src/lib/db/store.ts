@@ -321,6 +321,18 @@ export class OperationalStore {
     }
   }
 
+  /** Existence check that does not decrypt the stored token. */
+  public hasOAuthConnection(userId: string, provider: "gmail" = "gmail"): boolean {
+    const db = this.connect();
+    try {
+      return Boolean(
+        db.prepare("SELECT 1 FROM oauth_connections WHERE user_id = ? AND provider = ?").get(userId, provider)
+      );
+    } finally {
+      db.close();
+    }
+  }
+
   public updateOAuthSyncStatus(userId: string, status: string): void {
     const db = this.connect();
     try {
@@ -362,6 +374,8 @@ export class OperationalStore {
     const now = new Date().toISOString();
     const db = this.connect();
     try {
+      // A completed job is never demoted: a later failed or skipped attempt for the same
+      // attachment must not make hasProcessedAttachment() report it as unprocessed again.
       db.prepare(
         `INSERT INTO ingestion_jobs (
           job_id, user_id, source_type, source_message_id, attachment_sha256,
@@ -370,7 +384,8 @@ export class OperationalStore {
         ON CONFLICT(user_id, attachment_sha256) DO UPDATE SET
           status = excluded.status,
           snapshot_id = COALESCE(excluded.snapshot_id, ingestion_jobs.snapshot_id),
-          error_message = excluded.error_message`
+          error_message = excluded.error_message
+        WHERE ingestion_jobs.status <> 'completed'`
       ).run(
         jobId,
         params.userId,
@@ -731,29 +746,31 @@ export class OperationalStore {
     }
   }
 
+  /**
+   * Acquire (or renew, for the same owner) a lease. The check and the write are a single
+   * UPSERT so two processes can never both observe a free lease and both take it.
+   * Owners must be unique per attempt; the same owner id is treated as a renewal.
+   */
   public acquireLease(jobKey: string, ownerId: string, ttlSeconds = 300): boolean {
     const now = new Date();
-    const expires = new Date(now.getTime() + ttlSeconds * 1000);
     const nowIso = now.toISOString();
-    const expIso = expires.toISOString();
+    const expIso = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
 
     const db = this.connect();
     try {
-      const existing = db
-        .prepare("SELECT owner_id, expires_at FROM run_leases WHERE job_key = ?")
-        .get(jobKey) as { owner_id: string; expires_at: string } | undefined;
-      if (existing && existing.expires_at > nowIso && existing.owner_id !== ownerId) {
-        return false;
-      }
-      db.prepare(
-        `INSERT INTO run_leases (job_key, owner_id, acquired_at, expires_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(job_key) DO UPDATE SET
-           owner_id = excluded.owner_id,
-           acquired_at = excluded.acquired_at,
-           expires_at = excluded.expires_at`
-      ).run(jobKey, ownerId, nowIso, expIso);
-      return true;
+      const result = db
+        .prepare(
+          `INSERT INTO run_leases (job_key, owner_id, acquired_at, expires_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(job_key) DO UPDATE SET
+             owner_id = excluded.owner_id,
+             acquired_at = excluded.acquired_at,
+             expires_at = excluded.expires_at
+           WHERE run_leases.expires_at <= excluded.acquired_at
+              OR run_leases.owner_id = excluded.owner_id`
+        )
+        .run(jobKey, ownerId, nowIso, expIso);
+      return result.changes > 0;
     } finally {
       db.close();
     }
@@ -778,11 +795,19 @@ export class OperationalStore {
     }
   }
 
+  /**
+   * Persist a schedule patch. This is a trusted internal API (the worker uses it to set
+   * last_run_at); HTTP input must be validated with SchedulePatchSchema first.
+   */
   public updateSchedule(userId: string, patch: Partial<ScheduleRecord>): ScheduleRecord {
     const current = this.getSchedule(userId);
+    const defined = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined)
+    ) as Partial<ScheduleRecord>;
     const updated: ScheduleRecord = {
       ...current,
-      ...patch,
+      ...defined,
+      schedule_id: current.schedule_id,
       user_id: userId,
       updated_at: new Date().toISOString(),
     };
@@ -815,10 +840,13 @@ export class OperationalStore {
     }
   }
 
-  public listDueSchedules(): ScheduleRecord[] {
+  /** Enabled schedules; whether each one is due is decided by the worker (cron + timezone). */
+  public listEnabledSchedules(): ScheduleRecord[] {
     const db = this.connect();
     try {
-      return db.prepare("SELECT * FROM schedules WHERE enabled = 1").all() as ScheduleRecord[];
+      return db
+        .prepare("SELECT * FROM schedules WHERE enabled = 1 ORDER BY user_id")
+        .all() as ScheduleRecord[];
     } finally {
       db.close();
     }

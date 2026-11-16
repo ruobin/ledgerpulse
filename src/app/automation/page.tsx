@@ -48,21 +48,35 @@ export default function AutomationPage() {
   }
 
   useEffect(() => {
-    loadAll().catch(() => {});
+    // Surface the result of the Google OAuth redirect (/api/gmail/callback), then tidy the URL.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("connected") === "1") {
+      setSyncMessage("Gmail connected. Scheduled syncs will use this inbox.");
+    } else if (params.get("error")) {
+      setError(params.get("error"));
+    }
+    if (params.has("connected") || params.has("error")) {
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+
+    loadAll().catch(() => setError("Could not load automation settings."));
   }, []);
 
   async function handleSaveSchedule() {
     if (!schedule) return;
     setSaving(true);
     setError(null);
+    setSyncMessage(null);
     try {
       const res = await fetch("/api/schedules", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(schedule),
       });
-      if (!res.ok) throw new Error("Failed to save schedule");
-      setSyncMessage("Trading-day schedule saved to SQLite.");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Failed to save schedule");
+      setSchedule(data.schedule);
+      setSyncMessage("Schedule saved.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     } finally {
@@ -226,6 +240,21 @@ export default function AutomationPage() {
               </label>
 
               <div className="space-y-1">
+                <label className="text-xs font-medium text-slate-400">
+                  Run Schedule (cron, evaluated in the timezone below)
+                </label>
+                <input
+                  value={schedule.cron_expression}
+                  onChange={(e) => setSchedule({ ...schedule, cron_expression: e.target.value })}
+                  className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 font-mono text-xs text-white"
+                />
+                <p className="text-[11px] text-slate-500">
+                  <code>0 18 * * 1-5</code> = 18:00 Mon–Fri. Last scheduled run:{" "}
+                  {schedule.last_run_at ? new Date(schedule.last_run_at).toLocaleString() : "never"}
+                </p>
+              </div>
+
+              <div className="space-y-1">
                 <label className="text-xs font-medium text-slate-400">Gmail Search Query</label>
                 <input
                   value={schedule.gmail_query}
@@ -236,7 +265,7 @@ export default function AutomationPage() {
 
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1">
-                  <label className="text-xs font-medium text-slate-400">Timezone</label>
+                  <label className="text-xs font-medium text-slate-400">Timezone (IANA)</label>
                   <input
                     value={schedule.timezone}
                     onChange={(e) => setSchedule({ ...schedule, timezone: e.target.value })}

@@ -65,7 +65,7 @@ export default function DashboardPage() {
             <p className="text-sm leading-relaxed text-slate-300">
               Automatically fetch your Interactive Brokers Daily Activity Statement from Gmail or
               upload a brokerage PDF, verify extracted positions against page-level evidence, and
-              generate date-checked, cited market briefings with zero hallucinated claims.
+              generate cited market briefings that withhold undated or unsourced claims.
             </p>
           </div>
           <div className="flex flex-wrap gap-3">
@@ -219,7 +219,7 @@ export default function DashboardPage() {
               <div>
                 <p className="font-medium text-white">Two-Stage Evidence Synthesis</p>
                 <p className="text-xs text-slate-400">
-                  Deterministic Python date & citation gates block undated or unsourced claims before
+                  Deterministic date & citation gates block undated or unsourced claims before
                   scenario generation.
                 </p>
               </div>

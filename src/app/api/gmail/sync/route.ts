@@ -34,6 +34,8 @@ export async function POST(req: NextRequest) {
       days: sched.news_window_days,
       maxInstruments: sched.max_instruments,
       language: sched.language,
+      // Demo statements are labelled "sample" so they are not mistaken for real Gmail data.
+      sourceType: useDemo ? "sample" : "gmail",
       ...(useDemo
         ? {
             mockAttachment: {

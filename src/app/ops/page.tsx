@@ -22,21 +22,30 @@ interface EvalSummary {
 export default function OpsPage() {
   const [evalResult, setEvalResult] = useState<EvalSummary | null>(null);
   const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function runEvals() {
     setRunning(true);
+    setError(null);
     try {
       const res = await fetch("/api/evals", { method: "POST" });
       const data = await res.json();
+      if (!res.ok || !Array.isArray(data.suites)) {
+        throw new Error(data.error || "Evaluation run failed");
+      }
       setEvalResult(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Evaluation run failed");
     } finally {
       setRunning(false);
     }
   }
 
   useEffect(() => {
-    runEvals().catch(() => {});
+    runEvals();
   }, []);
+
+  const allPassed = evalResult ? evalResult.overall_passed === evalResult.overall_total : false;
 
   return (
     <div className="space-y-6">
@@ -59,16 +68,26 @@ export default function OpsPage() {
         </button>
       </div>
 
+      {error && (
+        <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-300">
+          {error}
+        </div>
+      )}
+
       {evalResult && (
         <div className="space-y-6">
-          <div className="flex items-center justify-between rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-5">
+          <div
+            className={`flex items-center justify-between rounded-2xl border p-5 ${
+              allPassed ? "border-emerald-500/30 bg-emerald-500/10" : "border-amber-500/30 bg-amber-500/10"
+            }`}
+          >
             <div className="flex items-center gap-3">
-              <ShieldCheck className="h-7 w-7 text-emerald-400" />
+              <ShieldCheck className={`h-7 w-7 ${allPassed ? "text-emerald-400" : "text-amber-400"}`} />
               <div>
                 <p className="text-lg font-bold text-white">
                   Overall Guardrail Score: {(evalResult.overall_score * 100).toFixed(1)}%
                 </p>
-                <p className="text-xs text-emerald-200">
+                <p className={`text-xs ${allPassed ? "text-emerald-200" : "text-amber-200"}`}>
                   {evalResult.overall_passed}/{evalResult.overall_total} deterministic invariant
                   checks passed · Evaluated {new Date(evalResult.evaluated_at).toLocaleString()}
                 </p>
