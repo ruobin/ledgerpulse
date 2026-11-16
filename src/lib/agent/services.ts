@@ -446,8 +446,8 @@ export function renderAnalysis(
 }
 
 export interface SynthesisModelRunner {
-  extractEvidence: (payloadJson: string) => Promise<Evidence>;
-  generateScenarios: (payloadJson: string) => Promise<Scenarios>;
+  extractEvidence: (payloadJson: string, budget: number) => Promise<Evidence>;
+  generateScenarios: (payloadJson: string, budget: number) => Promise<Scenarios>;
 }
 
 export async function synthesizeResearch(
@@ -471,11 +471,11 @@ export async function synthesizeResearch(
 
   const runEvidence =
     runner?.extractEvidence ??
-    (async (payloadJson: string) => {
-      const completion = await openai!.beta.chat.completions.parse({
+    (async (payloadJson: string, budget: number) => {
+      const completion = await openai!.chat.completions.create({
         model: analysisModel,
         temperature: 0,
-        max_tokens: 5000,
+        max_tokens: budget,
         messages: [
           {
             role: "system",
@@ -492,16 +492,20 @@ export async function synthesizeResearch(
         response_format: zodResponseFormat(EvidenceSchema, "evidence"),
       });
       recordUsage(completion.usage);
-      return completion.choices[0]?.message?.parsed ?? { news: [], limitations: [] };
+      const choice = completion.choices[0];
+      if (choice?.finish_reason === "length") throw new LengthFinishReasonError();
+      if (choice?.finish_reason === "content_filter") throw new ContentFilterFinishReasonError();
+      if (!choice?.message.content || choice.message.refusal) throw new Error("Structured evidence returned empty output or was refused.");
+      return EvidenceSchema.parse(JSON.parse(choice.message.content));
     });
 
   const runScenarios =
     runner?.generateScenarios ??
-    (async (payloadJson: string) => {
-      const completion = await openai!.beta.chat.completions.parse({
+    (async (payloadJson: string, budget: number) => {
+      const completion = await openai!.chat.completions.create({
         model: analysisModel,
         temperature: 0,
-        max_tokens: 3000,
+        max_tokens: budget,
         messages: [
           {
             role: "system",
@@ -518,7 +522,11 @@ export async function synthesizeResearch(
         response_format: zodResponseFormat(ScenariosSchema, "scenarios"),
       });
       recordUsage(completion.usage);
-      return completion.choices[0]?.message?.parsed ?? { interpretation: "", ideas: [] };
+      const choice = completion.choices[0];
+      if (choice?.finish_reason === "length") throw new LengthFinishReasonError();
+      if (choice?.finish_reason === "content_filter") throw new ContentFilterFinishReasonError();
+      if (!choice?.message.content || choice.message.refusal) throw new Error("Structured analysis returned empty output or was refused.");
+      return ScenariosSchema.parse(JSON.parse(choice.message.content));
     });
 
   const evidencePayload = JSON.stringify({
@@ -529,53 +537,59 @@ export async function synthesizeResearch(
     research_evidence: result.markdown,
   });
 
-  const evidence = await runEvidence(evidencePayload);
-  const accepted = eligibleNews(evidence.news, result.sources, startIso, endIso);
-
-  // Stage-2 Context Isolation: scenarios model ONLY sees accepted, dated, cited facts.
-  let scenarios: Scenarios = { interpretation: "", ideas: [] };
-  if (accepted.length > 0) {
-    const scenarioPayload = JSON.stringify({
-      instrument: result.instrument,
-      language,
-      accepted_news: accepted.map(({ fact, ids }) => ({
-        ...fact,
-        source_links: ids.map((i) => `[Source ${i + 1}](<${result.sources[i].url}>)`),
-      })),
-    });
-    scenarios = await runScenarios(scenarioPayload);
+  async function runStage<T>(stage: string, budgets: number[], run: (budget: number) => Promise<T>): Promise<T> {
+    for (const budget of budgets) {
+      try { return await run(budget); } catch (err) {
+        if (errorKind(err) !== "LengthFinishReasonError") throw new Error(`${stage} synthesis failed: ${safeError(err)}`);
+      }
+    }
+    throw new Error(`${stage} synthesis output was truncated after automatic retry.`);
   }
 
-  const analysis: Analysis = {
-    news: evidence.news,
-    interpretation: scenarios.interpretation,
-    ideas: scenarios.ideas,
-    limitations: evidence.limitations,
-  };
-  const excludedCount = evidence.news.length - accepted.length;
-  const rendered = {
-    ...result,
-    markdown: renderAnalysis(analysis, result.sources, startIso, endIso),
-    excluded_news_count: excludedCount,
-  };
-  if (!config) {
-    return rendered; // injected runners (tests, evals) report no usage
-  }
-
-  return {
-    ...rendered,
+  const withUsage = (research: Research): Research => config ? {
+    ...research,
     usage: {
       input_tokens: result.usage.input_tokens + analysisUsage.input_tokens,
       output_tokens: result.usage.output_tokens + analysisUsage.output_tokens,
       total_tokens: result.usage.total_tokens + analysisUsage.total_tokens,
     },
-    cost_usd: Number(
-      (
-        (result.cost_usd ?? 0) +
-        estimateCostUsd(analysisModel, analysisUsage.input_tokens, analysisUsage.output_tokens, 0, config.pricing)
-      ).toFixed(6)
-    ),
-  };
+    cost_usd: Number(((result.cost_usd ?? 0) + estimateCostUsd(analysisModel, analysisUsage.input_tokens, analysisUsage.output_tokens, 0, config.pricing)).toFixed(6)),
+  } : research;
+
+  try {
+    const evidence = await runStage("Evidence", [5000, 16000], (budget) => runEvidence(evidencePayload, budget));
+    const accepted = eligibleNews(evidence.news, result.sources, startIso, endIso);
+
+    // Stage-2 Context Isolation: scenarios model ONLY sees accepted, dated, cited facts.
+    let scenarios: Scenarios = { interpretation: "", ideas: [] };
+    if (accepted.length > 0) {
+      const scenarioPayload = JSON.stringify({
+        instrument: result.instrument,
+        language,
+        accepted_news: accepted.map(({ fact, ids }) => ({
+          ...fact,
+          source_links: ids.map((i) => `[Source ${i + 1}](<${result.sources[i].url}>)`),
+        })),
+      });
+      scenarios = await runStage("Analysis", [3000, 12000], (budget) => runScenarios(scenarioPayload, budget));
+    }
+
+    const analysis: Analysis = {
+      news: evidence.news,
+      interpretation: scenarios.interpretation,
+      ideas: scenarios.ideas,
+      limitations: evidence.limitations,
+    };
+    const excludedCount = evidence.news.length - accepted.length;
+    const rendered = {
+      ...result,
+      markdown: renderAnalysis(analysis, result.sources, startIso, endIso),
+      excluded_news_count: excludedCount,
+    };
+    return withUsage(rendered);
+  } catch (err) {
+    return withUsage({ ...result, status: "failed", markdown: safeError(err) });
+  }
 }
 
 interface ResearchPrompt {

@@ -53,6 +53,7 @@ WORKER_POLL_INTERVAL_MS=60000
 ```
 
 - Without `APP_PASSWORD` the production app answers every request with `503` (only `/api/health` stays open). If an upstream proxy such as Cloudflare Access or Tailscale already authenticates every request, set `APP_AUTH_DISABLED=true` instead.
+- Set `GMAIL_REDIRECT_URI` to the public HTTPS callback URL registered with Google. After the callback, the app redirects to `/automation` on that configured origin (including on OAuth errors), avoiding Docker bind addresses behind a reverse proxy. It does not use incoming host headers to choose this origin; without the setting it falls back to the request URL.
 - Keep `TOKEN_ENCRYPTION_KEY` stable and backed up: if it changes, stored Gmail tokens can no longer be decrypted and Gmail must be reconnected.
 - The AI provider, the model for each task, and web search (including a Brave Search API key) can be set either here in `.env` or after deployment in the **Admin Console** (`/admin`). Values saved there take precedence, and both containers use them without a restart. API keys saved in the Admin Console are encrypted with `TOKEN_ENCRYPTION_KEY`, which is one more reason to keep that key stable. See the README sections *Admin Console*, *Choosing models*, *Web search providers* and *Using an API gateway*.
 

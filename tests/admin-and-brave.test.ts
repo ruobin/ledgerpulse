@@ -194,6 +194,24 @@ const analysisRoute: Route = (req) => {
 };
 
 describe("Brave Search provider", () => {
+  it("retains Brave results and all model usage when analysis exhausts its truncation retry", async () => {
+    const brave = await startJsonServer(() => ({ json: BRAVE_NEWS }));
+    const gateway = await startJsonServer((req) => req.body.response_format?.json_schema?.name === "evidence"
+      ? analysisRoute(req)
+      : { json: chatCompletion("{}", { finishReason: "length" }) });
+    try {
+      for (const [name, value] of Object.entries({ LLM_BASE_URL: `${gateway.origin}/v1`, LLM_API_KEY: "gw-key", LLM_ANALYSIS_MODEL: "vendor/analysis-model", LLM_PRICING: JSON.stringify({ "vendor/analysis-model": { input: 10, output: 20 } }), WEB_SEARCH_PROVIDER: "brave", BRAVE_SEARCH_API_KEY: "brave-key", BRAVE_SEARCH_COST_PER_1K: "5", BRAVE_SEARCH_BASE_URL: `${brave.origin}/res/v1` })) vi.stubEnv(name, value);
+      const result = await researchInstrument(NVDA, WINDOW[0], WINDOW[1], "English");
+      expect(result.status).toBe("failed");
+      expect(result.markdown).toMatch(/analysis.*truncated/i);
+      expect(result.sources).toHaveLength(2);
+      expect(result.search_calls).toBe(1);
+      expect(result.usage).toEqual({ input_tokens: 300, output_tokens: 60, total_tokens: 360 });
+      expect(result.cost_usd).toBeCloseTo(0.0092, 6);
+      expect(gateway.requests.map((r) => r.body.max_tokens)).toEqual([5000, 3000, 12000]);
+      expect(brave.requests).toHaveLength(1);
+    } finally { await brave.close(); await gateway.close(); }
+  });
   it("searches the briefing window with Brave and analyses only those results", async () => {
     const brave = await startJsonServer(() => ({ json: BRAVE_NEWS }));
     const gateway = await startJsonServer(analysisRoute);

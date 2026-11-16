@@ -476,7 +476,7 @@ async function evalGmailAndResilience(): Promise<EvalSuite> {
         state.research[0].status === "failed" &&
         state.research[1].status === "cited" &&
         !state.markdown.includes("sk-secret-should-not-leak") &&
-        state.markdown.includes("cost limit excluded: GOOG"),
+        state.markdown.includes("instrument-count limit (2 stocks/ETFs) excluded: GOOG"),
       detail: "Failed ticker isolated, secret stripped, and maxInstruments budget cap enforced",
     });
   } finally {
