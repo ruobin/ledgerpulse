@@ -47,6 +47,7 @@ npm run eval        # 15-check deterministic guardrail scorecard ($0 API cost)
 
 ## Documentation
 
+- [LangGraph Study Guide: Ingestion Graph & Briefing Graph](docs/langgraph-guide.md)
 - [High-Level Design (HLD) & Scaling Blueprint](docs/architecture-hld.md)
 - [Low-Level Design (LLD) & Database Schema](docs/low-level-design.md)
 - [VPS Deployment Guide (Docker Compose + Caddy)](docs/vps-deployment.md)
