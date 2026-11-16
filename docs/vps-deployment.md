@@ -54,6 +54,7 @@ WORKER_POLL_INTERVAL_MS=60000
 
 - Without `APP_PASSWORD` the production app answers every request with `503` (only `/api/health` stays open). If an upstream proxy such as Cloudflare Access or Tailscale already authenticates every request, set `APP_AUTH_DISABLED=true` instead.
 - Keep `TOKEN_ENCRYPTION_KEY` stable and backed up: if it changes, stored Gmail tokens can no longer be decrypted and Gmail must be reconnected.
+- The AI provider, the model for each task, and web search (including a Brave Search API key) can be set either here in `.env` or after deployment in the **Admin Console** (`/admin`). Values saved there take precedence, and both containers use them without a restart. API keys saved in the Admin Console are encrypted with `TOKEN_ENCRYPTION_KEY`, which is one more reason to keep that key stable. See the README sections *Admin Console*, *Choosing models*, *Web search providers* and *Using an API gateway*.
 
 > **Google Cloud Console setup for the Gmail API**
 > 1. Enable the **Gmail API** in your Google Cloud project.

@@ -80,6 +80,12 @@ erDiagram
         text last_run_at
         text updated_at
     }
+    app_settings {
+        text key PK "Admin Console setting name"
+        text value "ciphertext when encrypted"
+        integer encrypted
+        text updated_at
+    }
     run_leases {
         text job_key PK
         text owner_id
@@ -160,9 +166,38 @@ The Automation page's sync button (`POST /api/gmail/sync`) runs the same sync wi
   - Rejects `source_page > pageCount` and quantities that are not finite decimals (thousands separators are removed).
   - Merges duplicates by `(symbol || name, exchange, asset_type)`. A `null` quantity means "not stated on this row" and never overrides an explicit one; numerically equal quantities (`"250"` and `"250.0000"`) agree; two different explicit quantities null the quantity permanently, with a warning.
 
+### AI configuration: `src/lib/ai-settings-catalog.ts`, `src/lib/ai-settings.ts`, `src/lib/agent/llm-config.ts`, `src/lib/agent/llm.ts`
+- **Catalog** (`ai-settings-catalog.ts`, client-safe): every editable AI setting with its label, `.env` aliases, default and help text, including the per-task model guidance shown in the Admin Console.
+- **Storage** (`ai-settings.ts`):
+  - Admin Console values live in `app_settings`; secrets are AES-256-GCM encrypted.
+  - `aiEnv()` layers the saved values over `process.env`, so the precedence is Admin Console, then environment, then default. With `strict`, a secret that no longer decrypts is an error rather than a silent fallback.
+  - `saveAiSettings()` validates the whole patch before writing anything and audits the key names (never values).
+  - `aiSettingsState()` reports each setting's source without returning secret values.
+- **Resolution** (`llm-config.ts`, pure): `resolveAiConfig(env)` validates and returns the endpoint, the per-task models (`extraction`, `analysis` defaulting to extraction, `research`), the web search provider, the Brave settings and pricing. Every setting is validated before a request is sent:
+  - The base URL must be http(s) with no embedded credentials or fragment; its query string becomes a default query on every request.
+  - Headers must be a JSON object of valid names and string values.
+  - The key may be omitted only when a gateway is set.
+  - Errors never echo URLs or header values.
+- **Client** (`llm.ts`):
+  - `loadAiConfig()` resolves the effective settings for each call.
+  - `createLlmClient(config)` builds the single OpenAI-compatible client used by every model call.
+  - `describeAiSetup()` names the search provider, the analysis model and the endpoint in report footers.
+
+### `src/lib/agent/search.ts`
+- **`braveSearch()`**: calls Brave's `news` or `web` search endpoint with `X-Subscription-Token`, passing `freshness=<start>to<end>` so only the briefing window is searched.
+  - The web endpoint merges its news and web sections.
+  - Results are kept only with credential-free http(s) URLs, are de-duplicated, and have highlight markup and entities stripped. `page_age` becomes the publication date.
+  - Failures map to specific messages: rejected key (401/403), rate limit (429), the validation detail for other statuses, or timeout.
+
 ### `src/lib/agent/services.ts`
+- **`errorKind(err)` / `safeError(err)`**: OpenAI SDK v4 error classes leave `name` as `"Error"`, so errors are classified with `instanceof`. `safeError` maps each kind to an actionable message. For 400, 404 and 422 errors it adds the provider's message when that message is short and doesn't look like it contains a credential.
 - **`readDocument(data, filename)`**: enforces the 10 MB, 80-page and 120,000-character limits, verifies the `%PDF-` signature, rejects pages with under 10 characters of text (scans; no OCR), tags pages `[PAGE N]`, and runs `redactPii()`.
-- **`extractStatement(text)`**: adaptive truncation recovery, starting at `max_tokens: 5000`. On `LengthFinishReasonError` it retries at `16000`, then calls `splitBatch()` on a line boundary, re-injecting the active `[PAGE N]` marker, and passes the first 800 characters as untrusted context to continuation batches (recursion depth ≤ 4).
+- **`extractStatement(text)`**: adaptive truncation recovery, starting at `max_tokens: 5000`. On `LengthFinishReasonError` (the SDK raises it when `finish_reason` is `length`) it retries at `16000`, then calls `splitBatch()` on a line boundary, re-injecting the active `[PAGE N]` marker, and passes the first 800 characters as untrusted context to continuation batches (recursion depth ≤ 4).
+- **`researchInstrument()`**: dispatches on `WEB_SEARCH_PROVIDER`.
+  - `openai`: the research model with the Responses API's hosted `web_search_preview` (at most 2 tool calls).
+  - `model`: the research model via Chat Completions `web_search_options`, reading `url_citation` annotations; each request counts as one search call.
+  - `brave`: one Brave request (10 results). The results become numbered evidence lines (`[source N] title (host, published date): snippet`) for the analysis model, with no research-model call.
+  - Each instrument carries `cost_usd`: research tokens and searches at the research model's (or Brave's) rate, plus analysis tokens at the analysis model's rate. Run telemetry sums these.
 - **`normalizeResearchFromResponse()`**: keeps only `url_citation` annotations whose URL normalizes to a credential-free `http(s)` href, replaces annotated spans with Markdown links right-to-left, and skips any span overlapping one already replaced. Every source is still listed in the report. Status is `cited` only when there was at least one search call and one valid source.
 - **`synthesizeResearch(result, startIso, endIso, language)`**:
   - **Stage 1 (`EvidenceSchema`)**: extracts `NewsFact[]` with an explicit `publication_date` and `source_ids`.
