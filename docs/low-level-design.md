@@ -203,11 +203,14 @@ The Automation page's sync button (`POST /api/gmail/sync`) runs the same sync wi
   - **Stage 1 (`EvidenceSchema`)**: extracts `NewsFact[]` with an explicit `publication_date` and `source_ids`.
   - **Deterministic gate (`eligibleNews()`)**: drops facts with no date, a date outside `[startIso, endIso]` (whole UTC calendar days), or no valid source id.
   - **Stage 2 (`ScenariosSchema`)**: runs only if accepted facts remain, and sees only `accepted_news`, never raw search text or rejected facts.
+  - Uses Chat Completions JSON-schema output with explicit JSON/Zod validation. `finish_reason: length` retries only the affected stage once: evidence at 5,000 → 16,000 tokens, scenarios at 3,000 → 12,000. Content filtering, refusals, empty output and invalid JSON/schema fail without a truncation retry.
+  - Synthesis failures return `status: failed` with a sanitized, stage-specific message while preserving search sources/counts and adding all returned synthesis token usage and estimated cost, including failed truncation attempts.
 
 ### `src/lib/agent/workflow.ts`
 - **`buildIngestionGraph()`**: `START -> extract_instruments -> validate_extraction -> END`.
 - **`buildBriefingGraph()`**: `START -> prepare_window -> (conditional: research_news | render_markdown) -> render_markdown -> save_report -> END`. `prepare_window` stamps `startedAtMs`, and `save_report` records end-to-end latency from it.
 - **`runBriefing()`** rejects non-integer or out-of-range bounds (`1–30` days, `1–10` instruments), including `NaN`.
+- **`selectInstruments()`** applies the instrument-count cap only to stocks/ETFs, skipping explicit zero-quantity holdings (but not activity instruments). Unsupported assets remain in the snapshot and receive local out-of-scope results. Reports distinguish cap exclusions from zero holdings and mark coverage as failed if all attempted research fails.
 
 ### `src/lib/cron.ts`
 - Dependency-free 5-field cron (`*`, values, ranges, lists, steps, `JAN`–`DEC`/`SUN`–`SAT`, weekday `7` = Sunday; day-of-month and day-of-week are OR-ed when both are restricted, as in Vixie cron).

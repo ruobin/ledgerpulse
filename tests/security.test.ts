@@ -99,6 +99,18 @@ describe("Gmail OAuth state (CSRF protection)", () => {
     expect(verifyOAuthState(new URL(authUrl).searchParams.get("state"), cookie?.value)).toBe("usr_owner");
   });
 
+  it("callback redirects to the configured public origin behind Docker and Nginx", async () => {
+    vi.stubEnv("GMAIL_REDIRECT_URI", "https://ledgerpulse.ai-dictionary.org/api/gmail/callback");
+    const res = await gmailCallback(
+      new NextRequest("https://0.0.0.0:3000/api/gmail/callback?error=access_denied")
+    );
+    const target = new URL(res.headers.get("location")!);
+    expect(target.origin).toBe("https://ledgerpulse.ai-dictionary.org");
+    expect(target.pathname).toBe("/automation");
+    expect(target.searchParams.get("error")).toContain("access_denied");
+    expect(res.cookies.get(OAUTH_STATE_COOKIE)?.maxAge).toBe(0);
+  });
+
   it("callback rejects forged state and provider errors without contacting Google", async () => {
     const { state } = createOAuthState("usr_owner");
     const errorFrom = (res: Response) => new URL(res.headers.get("location")!).searchParams.get("error");

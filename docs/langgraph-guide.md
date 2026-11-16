@@ -81,7 +81,7 @@ flowchart TD
      - If `> 0`, routes to `"research_news"`.
      - If `0`, skips `"research_news"` completely and jumps straight to `"render_markdown"` (saving API cost on empty statements).
 4. **Node 2 — `research_news`**:
-   - Slices `state.statement.instruments.slice(0, state.maxInstruments)` to enforce the per-run cost cap.
+   - Selects up to `maxInstruments` eligible stocks/ETFs in statement order. Unsupported assets receive local `unsupported` results without consuming the cap or making model calls. Zero-quantity positions in holdings snapshots are skipped and listed separately; activity-only positions remain eligible.
    - Loops through each instrument inside a `try / catch`:
      - Calls `researcher(item, windowStart, windowEnd, language)` (defaults to `services.researchInstrument()`).
      - If an individual ticker throws (e.g., network timeout), it catches the error, sanitizes it via `safeError()`, records `status: "failed"`, and continues researching the remaining tickers.

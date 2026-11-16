@@ -115,5 +115,5 @@ LedgerPulse is ready for a single VPS today and keeps clear seams for growth:
 3. **Worker (polling loop → queue)**
    - The worker polls schedules and coordinates through SQLite leases. At higher scale the same due-check can enqueue `(userId, occurrence)` jobs into Redis/BullMQ so several stateless workers process syncs and research in parallel.
 4. **Cost and rate-limit governance**
-   - Every run enforces `maxInstruments` (1–10) and one research request per instrument (at most 2 hosted searches in `responses` mode). `briefing_runs` records token usage and estimated USD spend per `user_id`, ready for quotas or billing.
+   - Every run enforces `maxInstruments` (1–10 eligible stocks/ETFs; unsupported assets and zero-quantity holdings do not consume the cap) and one research request per instrument (at most 2 hosted searches in `responses` mode). `briefing_runs` records token usage and estimated USD spend per `user_id`, ready for quotas or billing.
    - An API gateway in front of the models can add central key management, caching, rate limits, spend caps or provider fallbacks (depending on the gateway) without code changes; only the `LLM_*` settings change.

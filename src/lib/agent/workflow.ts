@@ -103,6 +103,14 @@ export type ResearcherFn = (
   language: string
 ) => Promise<Research>;
 
+function selectInstruments(statement: Statement, cap: number) {
+  const unsupported = statement.instruments.filter((i) => i.asset_type !== "stock" && i.asset_type !== "etf");
+  const equities = statement.instruments.filter((i) => i.asset_type === "stock" || i.asset_type === "etf");
+  const zero = equities.filter((i) => statement.kind === "holdings" && i.holding_quantity !== null && Number(i.holding_quantity) === 0);
+  const eligible = equities.filter((i) => !zero.includes(i));
+  return { unsupported, zero, selected: eligible.slice(0, cap), skipped: eligible.slice(cap) };
+}
+
 export function buildBriefingGraph(
   researcher: ResearcherFn = services.researchInstrument,
   store?: OperationalStore
@@ -121,8 +129,13 @@ export function buildBriefingGraph(
     })
     .addNode("research_news", async (state) => {
       const results: Research[] = [];
-      const slice = state.statement.instruments.slice(0, state.maxInstruments);
+      const { selected, unsupported } = selectInstruments(state.statement, state.maxInstruments);
+      const slice = state.statement.instruments.filter((i) => selected.includes(i) || unsupported.includes(i));
       for (const item of slice) {
+        if (unsupported.includes(item)) {
+          results.push({ instrument: item.symbol || item.name, status: "unsupported", markdown: `${item.asset_type} analysis is outside equity/ETF news scope; the instrument remains in the extracted snapshot.`, sources: [], search_calls: 0, usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }, latency_ms: 0, excluded_news_count: 0 });
+          continue;
+        }
         try {
           const res = await researcher(item, state.windowStart, state.windowEnd, state.language);
           results.push(res);
@@ -144,10 +157,13 @@ export function buildBriefingGraph(
     .addNode("render_markdown", async (state) => {
       const statement = state.statement;
       const results = state.research ?? [];
+      const selection = selectInstruments(statement, state.maxInstruments);
+      const attempted = results.filter((r) => r.status !== "unsupported");
+      const allFailed = attempted.length > 0 && attempted.every((r) => r.status === "failed");
       const limited =
         results.length === 0 ||
         results.some((r) => r.status !== "cited") ||
-        statement.instruments.length > state.maxInstruments;
+        selection.skipped.length > 0 || selection.zero.length > 0;
 
       const lines: string[] = [
         "# LedgerPulse — Portfolio & Activity Briefing",
@@ -156,7 +172,7 @@ export function buildBriefingGraph(
         `- **Requested news window (UTC):** ${state.windowStart} to ${state.windowEnd}`,
         `- **Input:** **${statement.kind}**; holdings as of: **${statement.as_of ?? "unknown"}**`,
         `- **Extraction review:** **${state.confirmed ? "user confirmed" : "not reviewed; verify against the statement"}**`,
-        `- **Coverage:** **${limited ? "limited" : "web search returned citations for all researched instruments"}**`,
+        `- **Coverage:** **${allFailed ? "failed — all attempted research failed" : limited ? "limited" : "web search returned citations for all researched instruments"}**`,
         "",
         "LedgerPulse generates educational market intelligence scenarios. It has no live pricing, risk profile, or order execution. " +
           "Publication dates and factual relevance are assessed by the model and validated against UTC calendar-day bounds.",
@@ -177,7 +193,7 @@ export function buildBriefingGraph(
       lines.push(statementToMarkdown(statement), "", "## Research and conditional trading ideas", "");
 
       if (results.length === 0) {
-        lines.push("No instruments were identified. No news or trading ideas were generated.", "");
+        lines.push("No eligible instruments were researched. No news or trading ideas were generated.", "");
       }
 
       for (const result of results) {
@@ -205,14 +221,17 @@ export function buildBriefingGraph(
         }
       }
 
-      const skipped = statement.instruments.slice(state.maxInstruments);
+      const skipped = selection.skipped;
       if (skipped.length > 0) {
         lines.push(
           "## Not researched in this run",
           "",
-          `The selected cost limit excluded: ${skipped.map((i) => i.symbol || i.name).join(", ")}.`,
+          `The selected instrument-count limit (${state.maxInstruments} stocks/ETFs) excluded: ${skipped.map((i) => i.symbol || i.name).join(", ")}.`,
           ""
         );
+      }
+      if (selection.zero.length > 0) {
+        lines.push("## Zero-quantity holdings not researched", "", `Zero-quantity positions are excluded from current holdings research: ${selection.zero.map((i) => i.symbol || i.name).join(", ")}.`, "");
       }
       lines.push("---", describeAiSetup().footer, "");
       return { markdown: lines.join("\n") };

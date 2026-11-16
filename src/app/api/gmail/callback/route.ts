@@ -8,7 +8,10 @@ import {
 } from "@/lib/gmail/oauth-state";
 
 function backToAutomation(req: NextRequest, params: Record<string, string>): NextResponse {
-  const target = new URL("/automation", req.url);
+  // Standalone Next.js can expose the Docker bind address in req.url behind a proxy.
+  // Use the server-configured OAuth origin, not untrusted incoming host headers.
+  const origin = process.env.GMAIL_REDIRECT_URI?.trim() || req.url;
+  const target = new URL("/automation", origin);
   for (const [key, value] of Object.entries(params)) {
     target.searchParams.set(key, value);
   }

@@ -130,6 +130,53 @@ function build58PositionIbkrFixture(): {
 }
 
 describe("LedgerPulse Multi-Asset & Workflow Integration Tests", () => {
+  it("retries truncated evidence and preserves gathered research on synthesis failure", async () => {
+    const gathered = { instrument: "NVDA", status: "cited" as const, markdown: "raw", sources: [{ title: "News", url: "https://example.com/news" }], search_calls: 1, usage: { input_tokens: 12, output_tokens: 3, total_tokens: 15 }, latency_ms: 0, excluded_news_count: 0, cost_usd: 0.005 };
+    const budgets: number[] = [];
+    const result = await synthesizeResearch(gathered, "2026-10-01", "2026-10-04", "English", {
+      extractEvidence: async (_payload, budget) => { budgets.push(budget); throw new LengthFinishReasonError(); },
+      generateScenarios: async () => ({ interpretation: "", ideas: [] }),
+    });
+    expect(budgets).toEqual([5000, 16000]);
+    expect(result).toMatchObject({ status: "failed", sources: gathered.sources, search_calls: 1, usage: gathered.usage, cost_usd: 0.005 });
+    expect(result.markdown).toMatch(/evidence.*truncated/i);
+  });
+
+  it("caps eligible holdings separately from unsupported and zero positions", async () => {
+    const { instruments } = build58PositionIbkrFixture();
+    const stock = instruments.find((i) => i.symbol === "NVDA")!;
+    const zero = instruments.find((i) => i.symbol === "SNDK")!;
+    const option = instruments.find((i) => i.asset_type === "option")!;
+    const etf = instruments.find((i) => i.symbol === "QQQ")!;
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "lp-selection-"));
+    try {
+      const called: string[] = [];
+      const res = await runBriefing({ statement: { kind: "holdings", as_of: "2026-10-02", period: "", instruments: [option, zero, stock, etf], warnings: [] }, maxInstruments: 1, store: new OperationalStore(tmpDir), researcher: async (item) => { called.push(item.symbol); throw new Error("failure"); } });
+      expect(called).toEqual(["NVDA"]);
+      expect(res.markdown).toMatch(/coverage.*failed/i);
+      expect(res.markdown).toMatch(/instrument-count limit .*excluded: QQQ/);
+      expect(res.markdown).toMatch(/zero.*SNDK/i);
+      expect(res.markdown).toContain("unsupported");
+    } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+  });
+
+  it("retries truncated analysis and keeps activity instruments eligible", async () => {
+    const gathered = { instrument: "NVDA", status: "cited" as const, markdown: "raw", sources: [{ title: "News", url: "https://example.com/news" }], search_calls: 1, usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 }, latency_ms: 0, excluded_news_count: 0 };
+    const budgets: number[] = [];
+    const result = await synthesizeResearch(gathered, "2026-10-01", "2026-10-04", "English", {
+      extractEvidence: async () => ({ news: [{ headline: "Event", publication_date: "2026-10-02", summary: "News", source_ids: [0] }], limitations: [] }),
+      generateScenarios: async (_payload, budget) => { budgets.push(budget); if (budgets.length === 1) throw new LengthFinishReasonError(); return { interpretation: "Analysis succeeded", ideas: [] }; },
+    });
+    expect(budgets).toEqual([3000, 12000]);
+    expect(result.markdown).toContain("Analysis succeeded");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "lp-activity-"));
+    try {
+      const item = build58PositionIbkrFixture().instruments.find((i) => i.symbol === "SNDK")!;
+      const called: string[] = [];
+      await runBriefing({ statement: { kind: "activity", as_of: null, period: "", instruments: [item], warnings: [] }, store: new OperationalStore(tmpDir), researcher: async (i) => { called.push(i.symbol); return result; } });
+      expect(called).toEqual(["SNDK"]);
+    } finally { fs.rmSync(tmpDir, { recursive: true, force: true }); }
+  });
   it("extracts, splits, validates, and persists a 58-position multi-asset IBKR statement", async () => {
     const { rawText, instruments } = build58PositionIbkrFixture();
     expect(instruments).toHaveLength(58);
