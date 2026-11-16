@@ -1,7 +1,9 @@
 import crypto from "crypto";
+import { z } from "zod";
 import type { Research } from "./agent/models";
 
-interface PricingRate {
+/** USD per 1M input/output tokens and per 1k hosted web searches. */
+export interface PricingRate {
   input: number;
   output: number;
   searchPer1k: number;
@@ -15,6 +17,75 @@ const MODEL_PRICING_PER_1M: Record<string, PricingRate> = {
 };
 
 const DEFAULT_PRICING: PricingRate = { input: 0.4, output: 1.6, searchPer1k: 10.0 };
+
+const PRICING_USAGE =
+  'LLM_PRICING must be a JSON object of model ids to USD prices, e.g. {"anthropic/claude-sonnet-4":{"input":3,"output":15,"searchPer1k":10}} (per 1M tokens; searchPer1k optional).';
+
+const PricingOverridesSchema = z.record(
+  z.string().min(1),
+  z
+    .object({
+      input: z.number().min(0),
+      output: z.number().min(0),
+      searchPer1k: z.number().min(0).optional(),
+    })
+    .strict()
+);
+
+/**
+ * Parse LLM_PRICING, which prices models the built-in table does not know (typical behind a
+ * gateway). Throws on malformed input; createLlmClient() calls this so the error surfaces
+ * before any model request.
+ */
+export function parsePricingOverrides(raw: string | undefined): Record<string, PricingRate> {
+  if (!raw?.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(PRICING_USAGE);
+  }
+  const result = PricingOverridesSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(PRICING_USAGE);
+  }
+  return Object.fromEntries(
+    Object.entries(result.data).map(([model, rate]) => [
+      model,
+      { input: rate.input, output: rate.output, searchPer1k: rate.searchPer1k ?? DEFAULT_PRICING.searchPer1k },
+    ])
+  );
+}
+
+/**
+ * Lookup keys from most to least specific, so gateway ids price like the underlying model:
+ * "openai/gpt-4.1-mini:online" -> "openai/gpt-4.1-mini" -> "gpt-4.1-mini", and dated snapshots
+ * such as "gpt-4.1-mini-2025-04-14" -> "gpt-4.1-mini".
+ */
+export function pricingKeys(model: string): string[] {
+  const withoutVariant = model.split(":")[0];
+  const withoutVendor = withoutVariant.slice(withoutVariant.lastIndexOf("/") + 1);
+  const withoutSnapshot = withoutVendor.replace(/-\d{4}-\d{2}-\d{2}$/, "");
+  return Array.from(new Set([model, withoutVariant, withoutVendor, withoutSnapshot]));
+}
+
+function envPricingOverrides(): Record<string, PricingRate> {
+  try {
+    return parsePricingOverrides(process.env.LLM_PRICING);
+  } catch {
+    // Reported when the AI configuration is loaded; cost estimation must never fail a run.
+    return {};
+  }
+}
+
+/** `overrides` are the effective LLM_PRICING entries (admin settings or .env). */
+export function pricingFor(model: string, overrides: Record<string, PricingRate> = envPricingOverrides()): PricingRate {
+  for (const key of pricingKeys(model)) {
+    const rate = overrides[key] ?? MODEL_PRICING_PER_1M[key];
+    if (rate) return rate;
+  }
+  return DEFAULT_PRICING;
+}
 
 const PII_PATTERNS: Array<[string, RegExp]> = [
   [
@@ -54,9 +125,10 @@ export function estimateCostUsd(
   model: string,
   inputTokens: number,
   outputTokens: number,
-  searchCalls = 0
+  searchCalls = 0,
+  overrides?: Record<string, PricingRate>
 ): number {
-  const rates = MODEL_PRICING_PER_1M[model] ?? DEFAULT_PRICING;
+  const rates = pricingFor(model, overrides);
   const tokenCost = (inputTokens / 1_000_000) * rates.input + (outputTokens / 1_000_000) * rates.output;
   const searchCost = (searchCalls / 1_000) * rates.searchPer1k;
   return Number((tokenCost + searchCost).toFixed(6));
@@ -88,6 +160,7 @@ export function computeRunTelemetry(
   let totalTokens = 0;
   let totalSearchCalls = 0;
   let excludedNewsCount = 0;
+  let totalCost = 0;
   let sumLatency = latencyMs;
   const statusCounts: Record<string, number> = {
     cited: 0,
@@ -108,6 +181,12 @@ export function computeRunTelemetry(
     totalInput += inTok;
     totalOutput += outTok;
     totalTokens += totTok;
+    // Items priced at call time (each model and search provider at its own rate) carry
+    // cost_usd; anything else is estimated here at the run model's rates.
+    totalCost +=
+      typeof item.cost_usd === "number"
+        ? item.cost_usd
+        : estimateCostUsd(model, inTok, outTok, Number(item.search_calls ?? 0));
 
     const excluded =
       item.excluded_news_count && item.excluded_news_count > 0
@@ -135,7 +214,7 @@ export function computeRunTelemetry(
     total_input_tokens: totalInput,
     total_output_tokens: totalOutput,
     total_tokens: totalTokens,
-    estimated_cost_usd: estimateCostUsd(model, totalInput, totalOutput, totalSearchCalls),
+    estimated_cost_usd: Number(totalCost.toFixed(6)),
     excluded_news_count: excludedNewsCount,
     latency_ms: sumLatency,
   };

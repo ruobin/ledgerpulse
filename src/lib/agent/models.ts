@@ -113,6 +113,8 @@ export const ResearchSchema = z
       .default({ input_tokens: 0, output_tokens: 0, total_tokens: 0 }),
     latency_ms: z.number().int().default(0),
     excluded_news_count: z.number().int().default(0),
+    /** Estimated USD for this instrument's search and model calls, priced per model. */
+    cost_usd: z.number().optional(),
   })
   .strict();
 

@@ -150,8 +150,8 @@ export default function IngestPage() {
           <Shield className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" />
           <div>
             Local pre-processing automatically strips account numbers, SSN/Tax IDs, and inline
-            emails before sending text to OpenAI for structured extraction. Raw PDFs are not
-            persisted.
+            emails before sending text to the configured AI provider (OpenAI unless an API
+            gateway is set) for structured extraction. Raw PDFs are not persisted.
           </div>
         </div>
 
@@ -162,7 +162,8 @@ export default function IngestPage() {
             onChange={(e) => setConsent(e.target.checked)}
             className="h-4 w-4 rounded border-slate-600 bg-slate-800 text-emerald-500"
           />
-          I agree to send sanitized statement text to OpenAI for structured extraction.
+          I agree to send sanitized statement text to the configured AI provider for structured
+          extraction.
         </label>
 
         {error && (

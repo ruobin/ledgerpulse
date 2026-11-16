@@ -177,6 +177,13 @@ export class OperationalStore {
           expires_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS app_settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          encrypted INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS schedules (
           schedule_id TEXT PRIMARY KEY,
           user_id TEXT NOT NULL UNIQUE,
@@ -835,6 +842,46 @@ export class OperationalStore {
         userId
       );
       return updated;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Deployment-wide settings edited in the Admin Console. Values arrive already encrypted
+   * where needed (see src/lib/ai-settings.ts); the store only persists them.
+   */
+  public listAppSettings(): Array<{ key: string; value: string; encrypted: boolean; updated_at: string }> {
+    const db = this.connect();
+    try {
+      const rows = db
+        .prepare("SELECT key, value, encrypted, updated_at FROM app_settings ORDER BY key")
+        .all() as Array<{ key: string; value: string; encrypted: number; updated_at: string }>;
+      return rows.map((row) => ({ ...row, encrypted: Boolean(row.encrypted) }));
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Upsert settings in one transaction; a null value deletes the override. */
+  public writeAppSettings(changes: Array<{ key: string; value: string | null; encrypted: boolean }>): void {
+    const now = new Date().toISOString();
+    const db = this.connect();
+    try {
+      const upsert = db.prepare(
+        `INSERT INTO app_settings (key, value, encrypted, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, encrypted = excluded.encrypted, updated_at = excluded.updated_at`
+      );
+      const remove = db.prepare("DELETE FROM app_settings WHERE key = ?");
+      db.transaction(() => {
+        for (const change of changes) {
+          if (change.value === null) {
+            remove.run(change.key);
+          } else {
+            upsert.run(change.key, change.value, change.encrypted ? 1 : 0, now);
+          }
+        }
+      })();
     } finally {
       db.close();
     }

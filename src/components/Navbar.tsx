@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, FileText, Mail, ShieldCheck, UploadCloud } from "lucide-react";
+import { Activity, FileText, Mail, ShieldCheck, SlidersHorizontal, UploadCloud } from "lucide-react";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview", icon: Activity },
@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: "/briefings", label: "Briefings", icon: FileText },
   { href: "/automation", label: "Gmail Automation", icon: Mail },
   { href: "/ops", label: "Ops & Evals", icon: ShieldCheck },
+  { href: "/admin", label: "Admin", icon: SlidersHorizontal },
 ];
 
 export function Navbar() {
